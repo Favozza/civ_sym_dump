@@ -1,5 +1,5 @@
 -- civ_sym_dump: dump all civilization symbols of the loaded world to a civ_symbols_nameworld.txt file in the DF folder
--- Usage: Embark -> Smooth stone wall/floor -> Dettail -> Specify image -> Existing image -> Click on DFHack -> civ_sym_dump
+-- Usage: Embark -> Smooth stone wall/floor -> Detail -> Specify image -> Existing image -> Click on DFHack -> Write civ_sym_dump
 
 local function safe(f, ...)
     local ok, r = pcall(f, ...)
