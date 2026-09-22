@@ -1,5 +1,5 @@
--- civ_sym_dump: dump all civilization symbols of the loaded world to a civ_symbols_nameworld.txt file in the DF folder
--- Usage: Embark -> Smooth stone wall/floor -> Detail -> Specify image -> Existing image -> Click on DFHack -> Write civ_sym_dump
+-- civ_sym_dump: dump all civilization and entity symbols of the loaded world to a civ_symbols_nameworld.txt file in the DF folder
+-- Usage: Embark -> Smooth stone wall/floor -> Dettail -> Specify image -> Existing image -> Click on DFHack -> civ_sym_dump
 
 local function safe(f, ...)
     local ok, r = pcall(f, ...)
@@ -55,7 +55,7 @@ local function describe(e)
     return t
 end
 
--- name of the civilization's own race, e.g. "Dwarf"
+-- name of the entity's own race, e.g. "Dwarf"
 local function civ_race_name(ent)
     local cr = ent.race >= 0 and safe(df.creature_raw.find, ent.race)
     local nm = cr and cr.name[0]
@@ -72,15 +72,44 @@ local function loaded_signature()
     return table.concat(ids, ',')
 end
 
--- writes the file, returns number of civs that could not be decoded
+-- human-readable label for an entity's actual DF type
+local function entity_type_name(ent)
+    local nm = safe(function() return df.historical_entity_type[ent.type] end)
+    return nm or ('type#' .. tostring(ent.type))
+end
+
+-- Helper to find parent civilization name from entity links
+local function find_parent_civ_name(ent, civ_map)
+    if ent.type == df.historical_entity_type.Civilization then
+        return nil
+    end
+    for _, link in ipairs(ent.entity_links) do
+        if civ_map[link.target] then
+            return civ_map[link.target]
+        end
+    end
+    return "Independent"
+end
+
+-- writes the file, returns number of entities that could not be decoded
 local function dump(filter)
     local by_race, decoded, missing, missing_chunks = {}, 0, 0, {}
 
+    -- Build a lookup map of all Civilizations by ID first
+    local civ_map = {}
     for _, ent in ipairs(df.global.world.entities.all) do
-        if ent.type == df.historical_entity_type.Civilization
-           and #ent.resources.art_image_ids > 0 and ent.name.has_name then
+        if ent.type == df.historical_entity_type.Civilization and ent.name.has_name then
+            civ_map[ent.id] = dfhack.translation.translateName(ent.name, true)
+        end
+    end
+
+    for _, ent in ipairs(df.global.world.entities.all) do
+        if #ent.resources.art_image_ids > 0 and ent.name.has_name then
             local cname = dfhack.translation.translateName(ent.name, true)
             local race = civ_race_name(ent)
+            local tname = entity_type_name(ent)
+            local parent_civ = find_parent_civ_name(ent, civ_map)
+
             local id = ent.resources.art_image_ids[0]
             local sub = ent.resources.art_image_subids[0]
             local img = find_image(id, sub)
@@ -95,25 +124,101 @@ local function dump(filter)
                 missing_chunks[id] = true
                 line = ('%s -> (symbol chunk %d not loaded)'):format(cname, id)
             end
+
             by_race[race] = by_race[race] or {}
-            table.insert(by_race[race], line)
+            local race_group = by_race[race]
+
+            -- Determine grouping key: Use parent civ name if linked, or cname if it's a standalone civ, 
+            -- or "Independent" for unlinked entities.
+            local group_key
+            if ent.type == df.historical_entity_type.Civilization then
+                group_key = cname
+                tname = "Civilization"
+            elseif parent_civ ~= "Independent" then
+                group_key = parent_civ
+            else
+                group_key = "Independent"
+            end
+
+            race_group[group_key] = race_group[group_key] or {}
+            local civ_bucket = race_group[group_key]
+
+            civ_bucket[tname] = civ_bucket[tname] or {}
+            table.insert(civ_bucket[tname], line)
         end
     end
 
-    -- sort races alphabetically and the civs inside each race
     local races = {}
-    for race, list in pairs(by_race) do
-        table.sort(list)
+    for race, _ in pairs(by_race) do
         races[#races + 1] = race
     end
     table.sort(races)
 
     local out = {}
     for i, race in ipairs(races) do
-        local list = by_race[race]
+        local race_group = by_race[race]
+        
+        -- Calculate total count for this race
+        local total_count = 0
+        for _, civ_bucket in pairs(race_group) do
+            for _, lines in pairs(civ_bucket) do
+                total_count = total_count + #lines
+            end
+        end
+
         if i > 1 then out[#out + 1] = '' end
-        out[#out + 1] = ('=== %s (%d civ%s) ==='):format(race, #list, #list == 1 and '' or 's')
-        for _, l in ipairs(list) do out[#out + 1] = l end
+        out[#out + 1] = ('=== %s (%d entr%s) ==='):format(race, total_count, total_count == 1 and 'y' or 'ies')
+
+        -- Sort group keys: Civilizations/Linked groups alphabetically, "Independent" strictly last
+        local group_keys = {}
+        for gkey, _ in pairs(race_group) do
+            group_keys[#group_keys + 1] = gkey
+        end
+        table.sort(group_keys, function(a, b)
+            if a == "Independent" then return false end
+            if b == "Independent" then return true end
+            return a < b
+        end)
+
+	for _, gkey in ipairs(group_keys) do
+            local civ_bucket = race_group[gkey]
+
+            if gkey == "Independent" then
+                out[#out + 1] = '-- Independent --'
+            else
+                -- Pull the main civilization line if it exists in the bucket
+                local civ_lines = civ_bucket["Civilization"]
+                local civ_main_line = (civ_lines and #civ_lines > 0) and civ_lines[1] or gkey
+                
+                out[#out + 1] = ('-- Civilization: %s --'):format(civ_main_line)
+            end
+
+            -- Sort entity types alphabetically within this civilization block, skipping "Civilization" since it's now in the header
+            local tnames = {}
+            for tname, _ in pairs(civ_bucket) do
+                if tname ~= "Civilization" then
+                    tnames[#tnames + 1] = tname
+                end
+            end
+            table.sort(tnames)
+
+            for _, tname in ipairs(tnames) do
+                local lines = civ_bucket[tname]
+                table.sort(lines)
+                
+                if gkey ~= "Independent" then
+                    out[#out + 1] = ('\t--- %s ---'):format(tname)
+                end
+
+                for _, l in ipairs(lines) do
+                    if gkey == "Independent" then
+                        out[#out + 1] = ('\t%s'):format(l)
+                    else
+                        out[#out + 1] = ('\t\t%s'):format(l)
+                    end
+                end
+            end
+        end
     end
 
     -- one file per world so results never mix
@@ -127,17 +232,7 @@ local function dump(filter)
     f:write(table.concat(out, '\n'), '\n')
     f:close()
 
-    if filter and filter ~= '' then
-        for _, race in ipairs(races) do
-            for _, l in ipairs(by_race[race]) do
-                if (race .. ' ' .. l):lower():find(filter, 1, true) then
-                    print(('[%s] %s'):format(race, l))
-                end
-            end
-        end
-    end
-
-    print(('civ_sym_dump: %d civs decoded, %d not decodable, %d races. Saved to %s')
+    print(('civ_sym_dump: %d entities decoded, %d not decodable, %d races. Saved to %s')
         :format(decoded, missing, #races, path))
     if missing > 0 then
         local ids = {}
